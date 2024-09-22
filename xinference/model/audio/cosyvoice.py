@@ -126,10 +126,10 @@ class CosyVoiceModel:
                             last_pos = new_last_pos
 
         def _generator_block():
-            chunk = next(output)
-            assert isinstance(chunk, dict), "Expected data to be of type dict"
+            chunks = [o["tts_speech"] for o in output]
+            t = torch.cat(chunks, dim=1)
             with BytesIO() as out:
-                torchaudio.save(out, chunk["tts_speech"], sample_rate=sample_rate, backend=backend, encoding=encoding, format=response_format, bits_per_sample=bits_per_sample)
+                torchaudio.save(out, t, sample_rate=sample_rate, backend=backend, encoding=encoding, format=response_format, bits_per_sample=bits_per_sample)
                 return out.getvalue()
 
         return _generator_stream() if stream else _generator_block()

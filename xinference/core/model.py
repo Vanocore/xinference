@@ -769,7 +769,7 @@ class ModelActor(xo.StatelessActor):
         self,
         image: "PIL.Image",
         prompt: str,
-        negative_prompt: str,
+        negative_prompt: Optional[str] = None,
         n: int = 1,
         size: Optional[str] = None,
         response_format: str = "url",
@@ -777,12 +777,12 @@ class ModelActor(xo.StatelessActor):
         **kwargs,
     ):
         kwargs.pop("request_id", None)
+        kwargs["negative_prompt"] = negative_prompt
         if hasattr(self._model, "image_to_image"):
             return await self._call_wrapper_json(
                 self._model.image_to_image,
                 image,
                 prompt,
-                negative_prompt,
                 n,
                 size,
                 response_format,
@@ -792,6 +792,20 @@ class ModelActor(xo.StatelessActor):
         raise AttributeError(
             f"Model {self._model.model_spec} is not for creating image."
         )
+
+    @request_limit
+    @log_async(logger=logger)
+    async def img2img(
+        self,
+        **kwargs,
+    ):
+        kwargs.pop("request_id", None)
+        if hasattr(self._model, "img2img"):
+            return await self._call_wrapper_json(
+                self._model.img2img,
+                **kwargs,
+            )
+        raise AttributeError(f"Model {self._model.model_spec} is not for img2img.")
 
     @log_async(
         logger=logger,

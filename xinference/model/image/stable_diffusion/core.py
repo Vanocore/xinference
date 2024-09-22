@@ -14,23 +14,25 @@
 
 import base64
 import contextlib
+import inspect
 import logging
 import os
 import re
 import sys
 import time
 import uuid
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from io import BytesIO
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import PIL.Image
 import torch
 from PIL import ImageOps
 
 from ....constants import XINFERENCE_IMAGE_DIR
-from ....device_utils import move_model_to_available_device
+from ....device_utils import get_available_device, move_model_to_available_device
 from ....types import Image, ImageList, LoRA
 from ..sdapi import SDAPIDiffusionModelMixin
 
@@ -57,6 +59,23 @@ SAMPLING_METHODS = [
     "LMS",
     "LMS Karras",
 ]
+
+
+def model_accept_param(params: Union[str, List[str]], model: Any) -> bool:
+    params = [params] if isinstance(params, str) else params
+    # model is diffusers Pipeline
+    parameters = inspect.signature(model.__call__).parameters  # type: ignore
+    allow_params = False
+    for param in parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            # the __call__ can accept **kwargs,
+            # we treat it as it can accept any parameters
+            allow_params = True
+            break
+    if not allow_params:
+        if all(param in parameters for param in params):
+            allow_params = True
+    return allow_params
 
 
 class DiffusionModel(SDAPIDiffusionModelMixin):
@@ -167,7 +186,9 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
                 self._kwargs[text_encoder_name] = text_encoder
                 self._kwargs["device_map"] = "balanced"
 
-        logger.debug("Loading model %s", AutoPipelineModel)
+        logger.debug(
+            "Loading model from %s, kwargs: %s", self._model_path, self._kwargs
+        )
         self._model = AutoPipelineModel.from_pretrained(
             self._model_path,
             **self._kwargs,
@@ -182,11 +203,12 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
         self._model.enable_attention_slicing()
         self._apply_lora()
 
-    def _get_scheduler(self, sampler_name: str):
-        if not sampler_name:
+    @staticmethod
+    def _get_scheduler(model: Any, sampler_name: str):
+        if not sampler_name or sampler_name == "default":
             return
 
-        assert self._model is not None
+        assert model is not None
 
         import diffusers
 
@@ -194,80 +216,73 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
         # to get A1111 <> Diffusers Scheduler mapping
         if sampler_name == "DPM++ 2M":
             return diffusers.DPMSolverMultistepScheduler.from_config(
-                self._model.scheduler.config
+                model.scheduler.config
             )
         elif sampler_name == "DPM++ 2M Karras":
             return diffusers.DPMSolverMultistepScheduler.from_config(
-                self._model.scheduler.config, use_karras_sigmas=True
+                model.scheduler.config, use_karras_sigmas=True
             )
         elif sampler_name == "DPM++ 2M SDE":
             return diffusers.DPMSolverMultistepScheduler.from_config(
-                self._model.scheduler.config, algorithm_type="sde-dpmsolver++"
+                model.scheduler.config, algorithm_type="sde-dpmsolver++"
             )
         elif sampler_name == "DPM++ 2M SDE Karras":
             return diffusers.DPMSolverMultistepScheduler.from_config(
-                self._model.scheduler.config,
+                model.scheduler.config,
                 algorithm_type="sde-dpmsolver++",
                 use_karras_sigmas=True,
             )
         elif sampler_name == "DPM++ SDE":
             return diffusers.DPMSolverSinglestepScheduler.from_config(
-                self._model.scheduler.config
+                model.scheduler.config
             )
         elif sampler_name == "DPM++ SDE Karras":
             return diffusers.DPMSolverSinglestepScheduler.from_config(
-                self._model.scheduler.config, use_karras_sigmas=True
+                model.scheduler.config, use_karras_sigmas=True
             )
         elif sampler_name == "DPM2":
-            return diffusers.KDPM2DiscreteScheduler.from_config(
-                self._model.scheduler.config
-            )
+            return diffusers.KDPM2DiscreteScheduler.from_config(model.scheduler.config)
         elif sampler_name == "DPM2 Karras":
             return diffusers.KDPM2DiscreteScheduler.from_config(
-                self._model.scheduler.config, use_karras_sigmas=True
+                model.scheduler.config, use_karras_sigmas=True
             )
         elif sampler_name == "DPM2 a":
             return diffusers.KDPM2AncestralDiscreteScheduler.from_config(
-                self._model.scheduler.config
+                model.scheduler.config
             )
         elif sampler_name == "DPM2 a Karras":
             return diffusers.KDPM2AncestralDiscreteScheduler.from_config(
-                self._model.scheduler.config, use_karras_sigmas=True
+                model.scheduler.config, use_karras_sigmas=True
             )
         elif sampler_name == "Euler":
-            return diffusers.EulerDiscreteScheduler.from_config(
-                self._model.scheduler.config
-            )
+            return diffusers.EulerDiscreteScheduler.from_config(model.scheduler.config)
         elif sampler_name == "Euler a":
             return diffusers.EulerAncestralDiscreteScheduler.from_config(
-                self._model.scheduler.config
+                model.scheduler.config
             )
         elif sampler_name == "Heun":
-            return diffusers.HeunDiscreteScheduler.from_config(
-                self._model.scheduler.config
-            )
+            return diffusers.HeunDiscreteScheduler.from_config(model.scheduler.config)
         elif sampler_name == "LMS":
-            return diffusers.LMSDiscreteScheduler.from_config(
-                self._model.scheduler.config
-            )
+            return diffusers.LMSDiscreteScheduler.from_config(model.scheduler.config)
         elif sampler_name == "LMS Karras":
             return diffusers.LMSDiscreteScheduler.from_config(
-                self._model.scheduler.config, use_karras_sigmas=True
+                model.scheduler.config, use_karras_sigmas=True
             )
         else:
             raise ValueError(f"Unknown sampler: {sampler_name}")
 
+    @staticmethod
     @contextlib.contextmanager
-    def _reset_when_done(self, sampler_name: str):
-        assert self._model is not None
-        scheduler = self._get_scheduler(sampler_name)
+    def _reset_when_done(model: Any, sampler_name: str):
+        assert model is not None
+        scheduler = DiffusionModel._get_scheduler(model, sampler_name)
         if scheduler:
-            default_scheduler = self._model.scheduler
-            self._model.scheduler = scheduler
+            default_scheduler = model.scheduler
+            model.scheduler = scheduler
             try:
                 yield
             finally:
-                self._model.scheduler = default_scheduler
+                model.scheduler = default_scheduler
         else:
             yield
 
@@ -286,16 +301,14 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
         origin_size = kwargs.pop("origin_size", None)
         seed = kwargs.pop("seed", None)
         if seed is not None:
-            kwargs["generator"] = generator = torch.Generator(device=self._model.device)  # type: ignore
+            kwargs["generator"] = generator = torch.Generator(device=get_available_device())  # type: ignore
             if seed != -1:
                 kwargs["generator"] = generator.manual_seed(seed)
         sampler_name = kwargs.pop("sampler_name", None)
         assert callable(model)
-        with self._reset_when_done(sampler_name):
-            logger.debug(
-                "stable diffusion args: %s",
-                kwargs,
-            )
+        with self._reset_when_done(model, sampler_name):
+            logger.debug("stable diffusion args: %s, model: %s", kwargs, model)
+            self._filter_kwargs(model, kwargs)
             images = model(**kwargs).images
 
         # revert padding if padded
@@ -334,10 +347,16 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
             raise ValueError(f"Unsupported response format: {response_format}")
 
     @classmethod
-    def _filter_kwargs(cls, kwargs: dict):
+    def _filter_kwargs(cls, model, kwargs: dict):
         for arg in ["negative_prompt", "num_inference_steps"]:
             if not kwargs.get(arg):
                 kwargs.pop(arg, None)
+
+        for key in list(kwargs):
+            allow_key = model_accept_param(key, model)
+            if not allow_key:
+                warnings.warn(f"{type(model)} cannot accept `{key}`, will ignore it")
+                kwargs.pop(key)
 
     def text_to_image(
         self,
@@ -352,7 +371,6 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
         width, height = map(int, re.split(r"[^\d]+", size))
         generate_kwargs = self._model_spec.default_generate_config.copy()  # type: ignore
         generate_kwargs.update({k: v for k, v in kwargs.items() if v is not None})
-        self._filter_kwargs(generate_kwargs)
         return self._call_model(
             prompt=prompt,
             height=height,
@@ -374,7 +392,6 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
         self,
         image: PIL.Image,
         prompt: Optional[Union[str, List[str]]] = None,
-        negative_prompt: Optional[Union[str, List[str]]] = None,
         n: int = 1,
         size: Optional[str] = None,
         response_format: str = "url",
@@ -408,12 +425,15 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
                 width, height = image.size
             kwargs["width"] = width
             kwargs["height"] = height
+        else:
+            # SD3 image2image cannot accept width and height
+            allow_width_height = model_accept_param(["width", "height"], model)
+            if allow_width_height:
+                kwargs["width"], kwargs["height"] = image.size
 
-        self._filter_kwargs(kwargs)
         return self._call_model(
             image=image,
             prompt=prompt,
-            negative_prompt=negative_prompt,
             num_images_per_prompt=n,
             response_format=response_format,
             model=model,
@@ -425,7 +445,6 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
         image: PIL.Image,
         mask_image: PIL.Image,
         prompt: Optional[Union[str, List[str]]] = None,
-        negative_prompt: Optional[Union[str, List[str]]] = None,
         n: int = 1,
         size: str = "1024*1024",
         response_format: str = "url",
@@ -467,7 +486,6 @@ class DiffusionModel(SDAPIDiffusionModelMixin):
             image=image,
             mask_image=mask_image,
             prompt=prompt,
-            negative_prompt=negative_prompt,
             height=height,
             width=width,
             num_images_per_prompt=n,

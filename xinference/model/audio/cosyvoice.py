@@ -66,6 +66,10 @@ class CosyVoiceModel:
         prompt_text,
         voice,
         response_format,
+        sample_rate,
+        backend,
+        encoding,
+        bits_per_sample,
     ):
         if prompt_speech:
             from cosyvoice.utils.file_utils import load_wav
@@ -125,7 +129,7 @@ class CosyVoiceModel:
             chunk = next(output)
             assert isinstance(chunk, dict), "Expected data to be of type dict"
             with BytesIO() as out:
-                torchaudio.save(out, chunk["tts_speech"], 22050, format=response_format)
+                torchaudio.save(out, chunk["tts_speech"], sample_rate=sample_rate, backend=backend, encoding=encoding, format=response_format, bits_per_sample=bits_per_sample)
                 return out.getvalue()
 
         return _generator_stream() if stream else _generator_block()
@@ -143,6 +147,10 @@ class CosyVoiceModel:
         prompt_text: Optional[str] = kwargs.pop("prompt_text", None)
         instruct_text: Optional[str] = kwargs.pop("instruct_text", None)
         seed: Optional[int] = kwargs.pop("seed", 0)
+        encoding: Optional[str] = kwargs.pop("encoding", "mp3")
+        sample_rate: Optional[int] = kwargs.pop("sample_rate", 22050)
+        backend: Optional[str] = kwargs.pop("backend", None)
+        bits_per_sample: Optional[int] = kwargs.pop("bits_per_sample", 16)
 
         if "SFT" in self._model_spec.model_name:
             # inference_sft
@@ -183,4 +191,8 @@ class CosyVoiceModel:
             prompt_text,
             voice,
             response_format,
+            sample_rate,
+            backend,
+            encoding,
+            bits_per_sample
         )

@@ -1,4 +1,4 @@
-FROM vllm/vllm-openai:latest
+FROM vllm/vllm-openai:v0.6.0
 
 COPY . /opt/inference
 WORKDIR /opt/inference
@@ -11,6 +11,7 @@ RUN apt-get -y update \
   # upgrade libstdc++ and libc for llama-cpp-python
   && printf "\ndeb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy main restricted universe multiverse" >> /etc/apt/sources.list \
   && apt-get -y update \
+  && apt-get install -y sox libsox-fmt-all libsox-dev \
   && apt-get install -y --only-upgrade libstdc++6 && apt install -y libc6 \
   && mkdir -p $NVM_DIR \
   && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash \
@@ -34,10 +35,13 @@ RUN pip install --upgrade -i "$PIP_INDEX" pip && \
     pip install flashinfer -i https://flashinfer.ai/whl/cu124/torch2.4 && \
     cd /opt/inference && \
     python3 setup.py build_web && \
-    git restore . && \
     pip install -i "$PIP_INDEX" --no-deps "." && \
+	pip install --no-deps 'openai-whisper==v20231117' && \
     # clean packages
     pip cache purge
+
+##DEV mounting codebase in runtime, deleting all in /opt/inference/
+RUN rm -rf /opt/inference/{*,.*}
 
 # Overwrite the entrypoint of vllm's base image
 ENTRYPOINT []

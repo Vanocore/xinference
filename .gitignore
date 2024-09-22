@@ -131,6 +131,7 @@ dmypy.json
 .idea
 .vscode
 *.iml
+*.vs*
 
 # VIM
 *.sw*
